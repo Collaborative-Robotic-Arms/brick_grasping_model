@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import cv2
 
-from resnet_grasp_neg.models import ResNetUNetGraspNoWidth
-from resnet_grasp_neg.utils.postprocess import post_process
+from brick_grasping_model.models import ResNetUNetGraspNoWidth
+from brick_grasping_model.utils.postprocess import post_process
 
 
 def load_rgb(path, out_size):

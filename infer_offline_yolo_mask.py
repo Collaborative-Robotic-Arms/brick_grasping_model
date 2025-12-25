@@ -7,7 +7,7 @@ import cv2
 import torch
 
 from ultralytics import YOLO  # YOLOv8/YOLO11 API
-from resnet_grasp_neg.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
+from brick_grasping_model.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
 
 
 # ----------------- IO + normalize (same as training) -----------------

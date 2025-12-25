@@ -6,7 +6,7 @@ import numpy as np
 import cv2
 import torch
 
-from resnet_grasp_neg.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
+from brick_grasping_model.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
 
 
 def load_rgb(path):

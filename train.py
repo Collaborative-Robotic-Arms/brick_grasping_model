@@ -9,10 +9,10 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
-from resnet_grasp_neg.datasets import BrickGraspNegDataset
-from resnet_grasp_neg.models import ResNetUNetGraspNoWidth, SegFormerGraspNoWidth, SwinGraspNoWidth
-from resnet_grasp_neg.losses import GraspLossWithNegativesNoWidth
-from resnet_grasp_neg.utils.postprocess import post_process
+from brick_grasping_model.datasets import BrickGraspNegDataset
+from brick_grasping_model.models import ResNetUNetGraspNoWidth, SegFormerGraspNoWidth, SwinGraspNoWidth
+from brick_grasping_model.losses import GraspLossWithNegativesNoWidth
+from brick_grasping_model.utils.postprocess import post_process
 
 
 def set_seed(seed=123):
