@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 
 install(PROGRAMS
   scripts/brick_grasping_node.py
+  scripts/advanced_grasping_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

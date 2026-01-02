@@ -10,43 +10,36 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
+from std_msgs.msg import Int32
 from sensor_msgs.msg import Image, CameraInfo
 from vision_msgs.msg import Detection2DArray
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 
-# --- IMPORTS FROM YOUR PACKAGE ---
-# Make sure your PYTHONPATH is set correctly as discussed previously
-# or adjust these imports to match your folder structure
+from dual_arms_msgs.msg import GraspPoint  
+
 try:
     from brick_grasping_model.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
 except ImportError:
-    # Fallback if running from a different root
     from detection_grasping.brick_grasping_model.models import SwinGraspNoWidth, ResNetUNetGraspNoWidth
 
 # =================================================================================
-# 1. HELPER FUNCTIONS (Adapted from offline_inference.py)
+# 1. HELPER FUNCTIONS
 # =================================================================================
 
 def normalize_rgb(rgb):
-    # rgb: float32 [0..1]
     return rgb - rgb.mean()
 
 def normalize_depth(d):
-    # d: float32 (meters or similar scale)
     return np.clip(d - float(d.mean()), -1.0, 1.0)
 
 def to_torch(arr):
-    # arr: H,W or H,W,C -> Torch Tensor 1,C,H,W
     if arr.ndim == 2:
         return torch.from_numpy(arr[None, ...].astype(np.float32))
     else:
         return torch.from_numpy(arr.transpose(2, 0, 1).astype(np.float32))
 
 def post_process(pos_logits, cos, sin):
-    """
-    Converts raw model output to Quality (0-1) and Angle (rad).
-    """
     pos = torch.sigmoid(pos_logits)
     ang = 0.5 * torch.atan2(sin, cos)
     q = pos.squeeze().detach().cpu().numpy()
@@ -97,9 +90,9 @@ class RosGraspNode(Node):
         )
 
         # --- Parameters ---
-        self.declare_parameter('ckpt_path', '/home/mohamed/gp_ws/src/detection_grasping/brick_grasping_model/weights/BEST.pth')       # Path to BEST.pth
-        self.declare_parameter('arch', 'swin_tiny')   # swin_tiny or resnet_unet
-        self.declare_parameter('input_size', 160)     # Model input size (e.g. 160)
+        self.declare_parameter('ckpt_path', '/home/mohamed/gp_ws/src/detection_grasping/brick_grasping_model/weights/BEST.pth')
+        self.declare_parameter('arch', 'swin_tiny')
+        self.declare_parameter('input_size', 160)
         self.declare_parameter('use_depth', True)
         self.declare_parameter('use_rgb', True)
         self.declare_parameter('rgb_topic', '/camera/camera/color/image_raw')
@@ -107,8 +100,9 @@ class RosGraspNode(Node):
         self.declare_parameter('dets_topic', '/yolo/detections')
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('depth_scale', 0.001)  # If depth is mm, convert to meters
+        self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('detection_debug', '/yolo/annotated_image')
+        self.declare_parameter('target_topic', '/grasp/target_index')
 
         # Read Parameters
         self.ckpt_path = self.get_parameter('ckpt_path').value
@@ -123,6 +117,7 @@ class RosGraspNode(Node):
         cam_info_topic = self.get_parameter('camera_info_topic').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.depth_scale = self.get_parameter('depth_scale').value
+        target_topic = self.get_parameter('target_topic').value
 
         # --- Load Model ---
         in_ch = (3 if self.use_rgb else 0) + (1 if self.use_depth else 0)
@@ -135,7 +130,6 @@ class RosGraspNode(Node):
         if self.ckpt_path:
             self.get_logger().info(f"Loading weights from: {self.ckpt_path}")
             ck = torch.load(self.ckpt_path, map_location=self.device)
-            # Handle if checkpoint is a dict or just state_dict
             sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
             self.model.load_state_dict(sd, strict=True)
         else:
@@ -149,31 +143,47 @@ class RosGraspNode(Node):
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, qos)
         self.dets_sub = self.create_subscription(Detection2DArray, dets_topic, self.dets_callback, 10)
         self.cam_info_sub = self.create_subscription(CameraInfo, cam_info_topic, self.cam_info_callback, 10)
+        
+        self.target_sub = self.create_subscription(Int32, target_topic, self.target_index_callback, 10)
 
         # Outputs
         self.vis_pub = self.create_publisher(Image, '/grasp/result_image', 10)
-        self.pose_pub = self.create_publisher(PoseStamped, '/grasp/pose', 10)
         
-        # Debug Publishers (Heatmaps)
+        # --- CHANGED: Using Custom Message Type ---
+        self.pose_pub = self.create_publisher(GraspPoint, '/grasp/result', 10)
+        
         self.pub_debug_q = self.create_publisher(Image, 'grasp/debug/quality', 10)
 
         # Buffers
         self.last_rgb = None
+        self.last_rgb_detection = None
         self.last_depth = None
         self.last_header = None
-        self.camera_intrinsics = None # [fx, fy, cx, cy]
+        self.camera_intrinsics = None 
+        
+        # Logic State
+        self.target_brick_idx = None
 
-        self.get_logger().info("Grasp Node Initialized.")
+        self.get_logger().info("Grasp Node Initialized. Waiting for target index...")
 
     # --- Callbacks ---
 
+    def target_index_callback(self, msg):
+        prev_target = self.target_brick_idx
+        self.target_brick_idx = msg.data
+        if prev_target != self.target_brick_idx:
+            self.get_logger().info(f"New Target Received: Index {self.target_brick_idx}. Starting grasp tracking.")
+
+    def detection_callback(self, msg):
+        try:
+            self.last_rgb_detection = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception as e:
+            self.get_logger().error(f"Detection Image Error: {e}")
+
     def cam_info_callback(self, msg):
-        # K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
         self.camera_intrinsics = {
-            'fx': msg.k[0],
-            'fy': msg.k[4],
-            'cx': msg.k[2],
-            'cy': msg.k[5]
+            'fx': msg.k[0], 'fy': msg.k[4],
+            'cx': msg.k[2], 'cy': msg.k[5]
         }
 
     def rgb_callback(self, msg):
@@ -186,70 +196,77 @@ class RosGraspNode(Node):
     def depth_callback(self, msg):
         try:
             d = self.bridge.imgmsg_to_cv2(msg, "passthrough")
-            # Convert to float32 meters immediately
             self.last_depth = d.astype(np.float32) * self.depth_scale
         except Exception as e:
             self.get_logger().error(f"Depth Error: {e}")
 
     def dets_callback(self, msg):
-        """
-        Main Trigger: 
-        1. Takes YOLO BBox
-        2. Crops RGB/Depth
-        3. Runs Inference
-        4. Publishes Pose
-        """
+        # 1. Checks
         if self.last_rgb is None or self.last_depth is None or self.camera_intrinsics is None:
             return
 
-        if len(msg.detections) == 0:
-            self.get_logger().warn("No detections received.")
+        if self.target_brick_idx is None:
             return
 
-        # 1. Pick Best Detection (highest score)
-        best_det = max(msg.detections, key=lambda d: d.results[0].hypothesis.score if d.results else 0)
-        score = best_det.results[0].hypothesis.score
-        
-        # 2. Get BBox Coordinates
-        cx_det = float(best_det.bbox.center.position.x)
-        cy_det = float(best_det.bbox.center.position.y)
-        w_det = float(best_det.bbox.size_x)
-        h_det = float(best_det.bbox.size_y)
+        if len(msg.detections) == 0:
+            return
 
-        # 3. Calculate Crop with Margin
+        # 2. SEARCH for the specific ID
+        target_det = None
+        for det in msg.detections:
+            if not det.results:
+                continue
+            hypothesis = det.results[0].hypothesis
+            
+            # Match against class_id or tracking_id
+            current_id_str = str(hypothesis.class_id)
+            target_id_str = str(self.target_brick_idx)
+            
+            if current_id_str == target_id_str:
+                target_det = det
+                break
+                
+            if hasattr(det, 'id'):
+                if str(det.id) == target_id_str:
+                    target_det = det
+                    break
+        
+        if target_det is None:
+            return
+
+        # 3. Get Coords
+        cx_det = float(target_det.bbox.center.position.x)
+        cy_det = float(target_det.bbox.center.position.y)
+        w_det = float(target_det.bbox.size_x)
+        h_det = float(target_det.bbox.size_y)
+
+        # 4. Crop
         H, W = self.last_rgb.shape[:2]
         margin = 1.2
         side = int(max(w_det, h_det) * margin)
-        # Ensure crop is not tiny, nor larger than image
         side = max(32, min(side, min(W, H)))
 
         x_center = int(cx_det)
         y_center = int(cy_det)
         
-        # Calculate boundaries handling image edges
         x1 = max(0, x_center - side // 2)
         y1 = max(0, y_center - side // 2)
         x2 = min(W, x1 + side)
         y2 = min(H, y1 + side)
         
-        # Adjust if we hit the right/bottom edge
         if (x2 - x1) < side: x1 = max(0, x2 - side)
         if (y2 - y1) < side: y1 = max(0, y2 - side)
 
-        # Extract Crops
         rgb_crop = self.last_rgb[y1:y2, x1:x2].copy()
         depth_crop = self.last_depth[y1:y2, x1:x2].copy()
 
         if rgb_crop.size == 0 or depth_crop.size == 0:
             return
 
-        # 4. Preprocessing for Model
-        # Resize to model input size (e.g. 160x160)
+        # 5. Preprocess
         rgb_in = cv2.resize(rgb_crop, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         depth_in = cv2.resize(depth_crop, (self.input_size, self.input_size), interpolation=cv2.INTER_NEAREST)
 
-        # Normalize & Convert to Tensor
-        # Note: Model expects RGB in [0..1] range before mean-subtraction
         rgb_norm = normalize_rgb(cv2.cvtColor(rgb_in, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0)
         depth_norm = normalize_depth(depth_in)
 
@@ -259,29 +276,25 @@ class RosGraspNode(Node):
         if self.use_rgb:
             tensors.append(to_torch(rgb_norm))
         
-        x_tensor = torch.cat(tensors, dim=0)[None, ...].to(self.device) # [1, C, H, W]
+        x_tensor = torch.cat(tensors, dim=0)[None, ...].to(self.device)
 
-        # 5. Inference
+        # 6. Inference
         with torch.no_grad():
             pos_logits, cos, sin = self.model(x_tensor)
             q_map, ang_map = post_process(pos_logits, cos, sin)
 
-        # 6. Find Best Grasp Pixel in the 160x160 Map
-        # Simple ArgMax
+        # 7. Find Best Grasp
         gy, gx = np.unravel_index(np.argmax(q_map), q_map.shape)
         best_q = q_map[gy, gx]
         best_ang = ang_map[gy, gx]
 
-        # Publish Debug Heatmap
         q_vis = (q_map * 255).astype(np.uint8)
         self.pub_debug_q.publish(self.bridge.cv2_to_imgmsg(cv2.applyColorMap(q_vis, cv2.COLORMAP_JET), "bgr8"))
 
-        if best_q < 0.01: # Threshold
-            self.get_logger().warn(f"Skipping: Low Quality Score: {best_q:.3f}")
+        if best_q < 0.01:
             return
 
-        # 7. Convert Coordinate Back to Full Image
-        # Scale factors from 160 -> Crop Size
+        # 8. Back to Full Image
         scale_x = (x2 - x1) / float(self.input_size)
         scale_y = (y2 - y1) / float(self.input_size)
 
@@ -291,24 +304,21 @@ class RosGraspNode(Node):
         cx_full = int(x1 + cx_crop)
         cy_full = int(y1 + cy_crop)
 
-        # 8. Get 3D Depth (Z)
-        # Use a small window median to avoid noisy dead pixels
+        # 9. Get Z
         d_val = depth_crop[int(cy_crop), int(cx_crop)]
         if d_val <= 0 or np.isnan(d_val):
-            # Try 5x5 window around point
             patch = depth_crop[max(0, int(cy_crop)-2):int(cy_crop)+3, 
                                max(0, int(cx_crop)-2):int(cx_crop)+3]
             valid_depths = patch[patch > 0]
             if len(valid_depths) > 0:
                 d_val = np.median(valid_depths)
             else:
-                d_val = 0.0 # Failed to get depth
+                d_val = 0.0
 
         if d_val <= 0:
-            self.get_logger().warn("Invalid Depth at grasp point")
             return
 
-        # 9. Compute 3D Pose (Pinhole Model)
+        # 10. Compute 3D Pose
         fx, fy = self.camera_intrinsics['fx'], self.camera_intrinsics['fy']
         cx, cy = self.camera_intrinsics['cx'], self.camera_intrinsics['cy']
 
@@ -316,42 +326,36 @@ class RosGraspNode(Node):
         Y = (cy_full - cy) * d_val / fy
         Z = d_val
 
-        # 10. Publish Pose
-        pose_msg = PoseStamped()
-        pose_msg.header = self.last_header
-        pose_msg.header.frame_id = self.camera_frame
-        pose_msg.pose.position.x = float(X)
-        pose_msg.pose.position.y = float(Y)
-        pose_msg.pose.position.z = float(Z)
+        # 11. Publish Custom BrickGrasp Message
+        grasp_msg = GraspPoint()
+        grasp_msg.header = self.last_header
+        grasp_msg.header.frame_id = self.camera_frame
         
-        # Convert 2D Theta to Quaternion (Rotation around Z-axis)
-        # Assuming gripper frame: X-axis is grasp direction? 
-        # Usually for top-down: Roll=0, Pitch=Pi, Yaw=Theta
-        # Here we just set orientation z/w as 2D rotation for simplicity,
-        # but for a real arm, you likely need a full orientation matrix.
+        grasp_msg.brick_id = self.target_brick_idx
+        grasp_msg.quality = float(best_q)
+  
+
+        grasp_msg.pose.position.x = float(X)
+        grasp_msg.pose.position.y = float(Y)
+        grasp_msg.pose.position.z = float(Z)
+        
         half_theta = best_ang / 2.0
-        pose_msg.pose.orientation.z = math.sin(half_theta)
-        pose_msg.pose.orientation.w = math.cos(half_theta)
+        grasp_msg.pose.orientation.z = math.sin(half_theta)
+        grasp_msg.pose.orientation.w = math.cos(half_theta)
 
-        self.pose_pub.publish(pose_msg)
+        self.pose_pub.publish(grasp_msg)
 
-        # 11. Visualize and Publish Image
-        vis_img = self.last_rgb_detection.copy()
+        # 12. Visualize
+        if self.last_rgb_detection is not None:
+            vis_img = self.last_rgb_detection.copy()
+            corners = grasp_corners(cx_full, cy_full, best_ang, length=50, width=20)
+            cv2.polylines(vis_img, [corners], isClosed=True, color=(255, 255, 0), thickness=2)
+            cv2.circle(vis_img, (cx_full, cy_full), 4, (0, 0, 255), -1)
+
+
+            self.vis_pub.publish(self.bridge.cv2_to_imgmsg(vis_img, "bgr8"))
         
-        # Draw Crop Box
-        cv2.rectangle(vis_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-        
-        # Draw Grasp
-        corners = grasp_corners(cx_full, cy_full, best_ang, length=50, width=20)
-        cv2.polylines(vis_img, [corners], isClosed=True, color=(0, 255, 0), thickness=2)
-        cv2.circle(vis_img, (cx_full, cy_full), 4, (0, 0, 255), -1)
-        
-        cv2.putText(vis_img, f"Q:{best_q:.2f} Z:{Z:.2f}m", (cx_full+10, cy_full), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        self.vis_pub.publish(self.bridge.cv2_to_imgmsg(vis_img, "bgr8"))
-        self.get_logger().info(f"Published Grasp at: X={X:.3f}, Y={Y:.3f}, Z={Z:.3f}, Q={best_q:.2f}")
-
+        self.get_logger().info(f"Published BrickGrasp: ID={self.target_brick_idx}, Q={best_q:.2f} at [{X:.2f}, {Y:.2f}, {Z:.2f}]")
 
 def main(args=None):
     rclpy.init(args=args)

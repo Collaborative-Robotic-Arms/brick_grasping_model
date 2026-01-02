@@ -17,6 +17,7 @@
   <depend>vision_msgs</depend>
   <depend>std_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>dual_arms_msgs</depend>
 
 
   <export>
