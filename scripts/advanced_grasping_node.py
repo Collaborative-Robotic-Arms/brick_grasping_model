@@ -102,10 +102,16 @@ class RosGraspNode(Node):
         self.declare_parameter('input_size', 160)
         self.declare_parameter('use_depth', True)
         self.declare_parameter('use_rgb', True)
-        self.declare_parameter('rgb_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+
+        self.declare_parameter('rgb_topic', '/environment_camera/image_raw')
+        self.declare_parameter('depth_topic', '/environment_camera/depth_image')
+        self.declare_parameter('camera_info_topic', '/environment_camera/camera_info')
+
+        # self.declare_parameter('rgb_topic', '/camera/camera/color/image_raw')
+        # self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+        # self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+
         self.declare_parameter('dets_topic', '/yolo/detections')
-        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('detection_debug', '/yolo/annotated_image')
@@ -367,7 +373,8 @@ class RosGraspNode(Node):
         # 10. Compute 3D Pose
         fx, fy = self.camera_intrinsics['fx'], self.camera_intrinsics['fy']
         cx, cy = self.camera_intrinsics['cx'], self.camera_intrinsics['cy']
-
+        d_val = d_val * 1000
+        self.get_logger().info(f"Camera Intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}, depth={d_val}")
         X = (cx_full - cx) * d_val / fx
         Y = (cy_full - cy) * d_val / fy
         Z = d_val
