@@ -103,17 +103,17 @@ class RosGraspNode(Node):
         self.declare_parameter('use_depth', True)
         self.declare_parameter('use_rgb', True)
 
-        self.declare_parameter('rgb_topic', '/environment_camera/image_raw')
-        self.declare_parameter('depth_topic', '/environment_camera/depth_image')
-        self.declare_parameter('camera_info_topic', '/environment_camera/camera_info')
+        # self.declare_parameter('rgb_topic', '/environment_camera/image_raw')
+        # self.declare_parameter('depth_topic', '/environment_camera/depth_image')
+        # self.declare_parameter('camera_info_topic', '/environment_camera/camera_info')
 
-        # self.declare_parameter('rgb_topic', '/camera/camera/color/image_raw')
-        # self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
-        # self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
 
         self.declare_parameter('dets_topic', '/yolo/detections')
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('depth_scale', 0.001)
+        self.declare_parameter('depth_scale', 1.00)
         self.declare_parameter('detection_debug', '/yolo/annotated_image')
         self.declare_parameter('target_topic', '/grasp/target_index')
 
@@ -123,7 +123,7 @@ class RosGraspNode(Node):
         self.input_size = self.get_parameter('input_size').value
         self.use_depth = self.get_parameter('use_depth').value
         self.use_rgb = self.get_parameter('use_rgb').value
-        rgb_topic = self.get_parameter('rgb_topic').value
+        rgb_topic = self.get_parameter('image_topic').value
         depth_topic = self.get_parameter('depth_topic').value
         dets_topic = self.get_parameter('dets_topic').value
         detection_debug = self.get_parameter('detection_debug').value
@@ -244,8 +244,8 @@ class RosGraspNode(Node):
         if self.last_rgb is None or self.last_depth is None or self.camera_intrinsics is None:
             return
 
-        if self.target_brick_idx is None:
-            return
+        # if self.target_brick_idx is None:
+        #     return
 
         if len(msg.detections) == 0:
             return
@@ -257,6 +257,7 @@ class RosGraspNode(Node):
         # 2. SEARCH for the specific ID
         target_det = None
         if self.detections is None:
+            self.get_logger().info("No detections yet.")
             return
 
         if len(self.detections.detections) == 0:
@@ -368,12 +369,13 @@ class RosGraspNode(Node):
                 d_val = 0.0
 
         if d_val <= 0:
+            self.get_logger().info("depth is a negative number.")
             return
 
         # 10. Compute 3D Pose
         fx, fy = self.camera_intrinsics['fx'], self.camera_intrinsics['fy']
         cx, cy = self.camera_intrinsics['cx'], self.camera_intrinsics['cy']
-        d_val = d_val * 1000
+        d_val = d_val # * 1000  # Convert to mm if needed
         self.get_logger().info(f"Camera Intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}, depth={d_val}")
         X = (cx_full - cx) * d_val / fx
         Y = (cy_full - cy) * d_val / fy
@@ -393,23 +395,12 @@ class RosGraspNode(Node):
         grasp_msg.pose.position.z = float(Z)
         
         half_theta = best_ang / 2.0
+        grasp_msg.pose.orientation.y = 0.0
+        grasp_msg.pose.orientation.x = 0.0
         grasp_msg.pose.orientation.z = math.sin(half_theta)
         grasp_msg.pose.orientation.w = math.cos(half_theta)
 
-        # with self.latest_grasp_lock:
-        #     self.latest_grasp = grasp_msg
-            
-
-        # self.grasp_ready_event.set()
         self.pose_pub.publish(grasp_msg)
-
-
-        # self.pose_pub.publish(grasp_msg)
-        # self.grasp_ready_event.set()
-        # with self.latest_grasp_lock:
-        #     self.latest_grasp = GraspPoint()
-        #     self.latest_grasp = grasp_msg
-        #     self.get_logger().error(f"grasp msg X: {grasp_msg.pose.position.x}")
             
         # 12. Visualize
         if self.last_rgb_detection is not None:
