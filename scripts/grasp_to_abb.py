@@ -62,7 +62,7 @@ class GraspRelay(Node):
         source_pose = PoseStamped()
         
         # 1. Set the frame explicitly as requested
-        source_pose.header.frame_id = 'camera' 
+        source_pose.header.frame_id = 'camera_color_optical_frame' 
         
         # 2. Use Time(seconds=0) to request the "latest available" transform.
         # If we use "now()", it often fails because TF data is slightly delayed.
@@ -77,7 +77,7 @@ class GraspRelay(Node):
             # timeout=Duration(seconds=1.0) waits up to 1s for the transform to arrive
             transformed_pose = self.tf_buffer.transform(
                 source_pose, 
-                'base_link', 
+                'camera_color_optical_frame', 
                 timeout=Duration(seconds=1.0)
             )
             transformed_pose.pose.orientation.z = msg.pose.orientation.z

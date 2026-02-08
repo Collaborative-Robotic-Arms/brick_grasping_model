@@ -61,17 +61,20 @@ class GraspRelay(Node):
         source_pose.header.stamp = Time(seconds=0).to_msg() 
         source_pose.pose = msg.pose
 
-        transformed_pose = None
+        transformed_pose = PoseStamped()
 
         # --- B. TF TRANSFORMATION BLOCK ---
         try:
             # Transform source_pose -> target_pose in 'base_link'
-            transformed_pose = self.tf_buffer.transform(
-                source_pose, 
-                'base_link', 
-                timeout=Duration(seconds=1.0)
-            )
-            
+            # transformed_pose = self.tf_buffer.transform(
+            #     source_pose, 
+            #     'abb_table', 
+            #     timeout=Duration(seconds=1.0)
+            # )
+            # -0.0546 0.769" rpy="3.14 1.57 0.0" />
+            transformed_pose.pose.position.z = 0.26 
+            transformed_pose.pose.position.x = source_pose.pose.position.y + 0.678
+            transformed_pose.pose.position.y = source_pose.pose.position.x - 0.0546
             # Maintain specific orientation components from the original logic
             transformed_pose.pose.orientation.z = msg.pose.orientation.z
             transformed_pose.pose.orientation.w = msg.pose.orientation.w
@@ -105,7 +108,7 @@ class GraspRelay(Node):
         goal_msg.target_pose.orientation.y = -QW
         goal_msg.target_pose.orientation.z = 0.0
         goal_msg.target_pose.orientation.w = 0.0
-        goal_msg.target_pose.position.z = 0.26
+        goal_msg.target_pose.position.z = 0.21
         self.get_logger().info(f"Target Pose: {target_pose.position.x}, {target_pose.position.y}, {target_pose.position.z}")
         self.get_logger().info(f"Sending goal for Task: {goal_msg.task_type}")
 

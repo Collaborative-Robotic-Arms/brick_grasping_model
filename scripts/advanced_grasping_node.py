@@ -103,13 +103,9 @@ class RosGraspNode(Node):
         self.declare_parameter('use_depth', True)
         self.declare_parameter('use_rgb', True)
 
-        # self.declare_parameter('rgb_topic', '/environment_camera/image_raw')
-        # self.declare_parameter('depth_topic', '/environment_camera/depth_image')
-        # self.declare_parameter('camera_info_topic', '/environment_camera/camera_info')
-
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
-        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        # self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info') # No longer used (Hardcoded)
 
         self.declare_parameter('dets_topic', '/yolo/detections')
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
@@ -127,10 +123,48 @@ class RosGraspNode(Node):
         depth_topic = self.get_parameter('depth_topic').value
         dets_topic = self.get_parameter('dets_topic').value
         detection_debug = self.get_parameter('detection_debug').value
-        cam_info_topic = self.get_parameter('camera_info_topic').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.depth_scale = self.get_parameter('depth_scale').value
         target_topic = self.get_parameter('target_topic').value
+
+        # =========================================================================
+        # --- HARDCODED CALIBRATION DATA (From Detection Node) ---
+        # =========================================================================
+        # Camera Matrix (K)
+        self.k_matrix = np.array([
+            [607.6493463464219, 0.0, 330.2045740645484],
+            [0.0, 605.19606629627, 246.36866587909964],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+
+        # Distortion Coefficients (D)
+        self.dist_coeffs = np.array([
+            0.030701467019085278, 0.6603616986413218, 
+            -0.0030859808687108714, -0.005391372766986892, 
+            -2.547370818352119
+        ], dtype=np.float64)
+
+        # Optimization: Pre-compute the Map
+        # Assuming standard RealSense 640x480.
+        self.img_w, self.img_h = 640, 480 
+        
+        # Alpha=0 crops the image to remove black edges created by undistortion
+        self.new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(
+            self.k_matrix, self.dist_coeffs, (self.img_w, self.img_h), 0, (self.img_w, self.img_h)
+        )
+        
+        self.map1, self.map2 = cv2.initUndistortRectifyMap(
+            self.k_matrix, self.dist_coeffs, None, self.new_camera_mtx, 
+            (self.img_w, self.img_h), cv2.CV_32FC1
+        )
+        
+        # This will be used for 3D reconstruction instead of the raw K matrix
+        self.optimized_intrinsics = {
+            'fx': self.new_camera_mtx[0, 0], 'fy': self.new_camera_mtx[1, 1],
+            'cx': self.new_camera_mtx[0, 2], 'cy': self.new_camera_mtx[1, 2]
+        }
+        self.get_logger().info("Hardcoded Calibration Loaded & Undistort Maps Computed.")
+        # =========================================================================
 
         # --- Load Model ---
         in_ch = (3 if self.use_rgb else 0) + (1 if self.use_depth else 0)
@@ -152,19 +186,20 @@ class RosGraspNode(Node):
         self.bridge = CvBridge()
 
         self.rgb_sub = self.create_subscription(Image, rgb_topic, self.rgb_callback, qos)
+        # Note: We must also undistort the detection debug image if we want to visualize correctly 
+        # aligned with the undistorted RGB/Depth we process.
         self.detection_sub = self.create_subscription(Image, detection_debug, self.detection_callback, qos)
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, qos)
         self.dets_sub = self.create_subscription(Detection2DArray, dets_topic, self.dets_callback, 10)
-        self.cam_info_sub = self.create_subscription(CameraInfo, cam_info_topic, self.cam_info_callback, 10)
+        
+        # We NO LONGER need camera_info subscription because we hardcoded it
+        # self.cam_info_sub = self.create_subscription(CameraInfo, cam_info_topic, self.cam_info_callback, 10)
         
         self.target_sub = self.create_subscription(Int32, target_topic, self.target_index_callback, 10)
 
         # Outputs
         self.vis_pub = self.create_publisher(Image, '/grasp/result_image', 10)
-        
-        # --- CHANGED: Using Custom Message Type ---
         self.pose_pub = self.create_publisher(GraspPoint, '/grasp/result', 10)
-        
         self.pub_debug_q = self.create_publisher(Image, 'grasp/debug/quality', 10)
 
         self.grasp_srv = self.create_service(
@@ -178,7 +213,6 @@ class RosGraspNode(Node):
         self.last_rgb_detection = None
         self.last_depth = None
         self.last_header = None
-        self.camera_intrinsics = None 
         
         # Logic State
         self.target_brick_idx = None
@@ -188,11 +222,7 @@ class RosGraspNode(Node):
     # --- Callbacks ---
     def handle_get_grasp(self, request, response):
         self.get_logger().info(f"Grasp service requested for brick ID: {request.brick_index}")
-
-        # Set target brick
         self.target_brick_idx = int(request.brick_index)
-
-        # Process grasp
         graspPoint = self.process_grasp()
 
         if graspPoint is None:
@@ -202,7 +232,6 @@ class RosGraspNode(Node):
 
         response.grasp_point = graspPoint
         response.success = True
-
         return response
 
     def target_index_callback(self, msg):
@@ -215,37 +244,67 @@ class RosGraspNode(Node):
 
     def detection_callback(self, msg):
         try:
-            self.last_rgb_detection = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            raw_det = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # NOTE: The detection node already publishes an UNDISTORTED image on '/yolo/annotated_image'.
+            # If 'detection_debug' topic comes from YoloV8Detector's image_pub, it is ALREADY undistorted.
+            # So we DO NOT undistort it again here.
+            self.last_rgb_detection = raw_det
         except Exception as e:
             self.get_logger().error(f"Detection Image Error: {e}")
 
-    def cam_info_callback(self, msg):
-        self.camera_intrinsics = {
-            'fx': msg.k[0], 'fy': msg.k[4],
-            'cx': msg.k[2], 'cy': msg.k[5]
-        }
+    # REMOVED cam_info_callback since we rely on hardcoded params now.
 
     def rgb_callback(self, msg):
         try:
-            self.last_rgb = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            raw_rgb = self.bridge.imgmsg_to_cv2(msg, "bgr8")
             self.last_header = msg.header
+            
+            # --- Check Resolution & Recompute Maps if needed ---
+            h, w = raw_rgb.shape[:2]
+            if w != self.img_w or h != self.img_h:
+                self.get_logger().warn(f"Resolution mismatch (Got {w}x{h}, Expected {self.img_w}x{self.img_h})! Recomputing maps...")
+                self.img_w, self.img_h = w, h
+                self.new_camera_mtx, _ = cv2.getOptimalNewCameraMatrix(
+                    self.k_matrix, self.dist_coeffs, (w, h), 0, (w, h)
+                )
+                self.map1, self.map2 = cv2.initUndistortRectifyMap(
+                    self.k_matrix, self.dist_coeffs, None, self.new_camera_mtx, 
+                    (w, h), cv2.CV_32FC1
+                )
+                self.optimized_intrinsics = {
+                    'fx': self.new_camera_mtx[0, 0], 'fy': self.new_camera_mtx[1, 1],
+                    'cx': self.new_camera_mtx[0, 2], 'cy': self.new_camera_mtx[1, 2]
+                }
+            
+            # --- APPLY UNDISTORTION ---
+            self.last_rgb = cv2.remap(raw_rgb, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
+            
         except Exception as e:
             self.get_logger().error(f"RGB Error: {e}")
 
     def depth_callback(self, msg):
         try:
-            d = self.bridge.imgmsg_to_cv2(msg, "passthrough")
-            self.last_depth = d.astype(np.float32) * self.depth_scale
+            raw_d = self.bridge.imgmsg_to_cv2(msg, "passthrough")
+            raw_d = raw_d.astype(np.float32) * self.depth_scale
+
+            # --- Check Resolution (Assuming depth matches RGB size) ---
+            h, w = raw_d.shape[:2]
+            if (self.map1 is not None) and (w == self.img_w) and (h == self.img_h):
+                 # --- APPLY UNDISTORTION TO DEPTH ---
+                 # Use INTER_NEAREST for depth to avoid creating fake pixel values at edges
+                 self.last_depth = cv2.remap(raw_d, self.map1, self.map2, interpolation=cv2.INTER_NEAREST)
+            else:
+                 # If sizes don't match yet, just store raw (will be caught in next RGB callback or checks)
+                 self.last_depth = raw_d
+
         except Exception as e:
             self.get_logger().error(f"Depth Error: {e}")
 
     def dets_callback(self, msg):
         # 1. Checks
-        if self.last_rgb is None or self.last_depth is None or self.camera_intrinsics is None:
+        # We check self.optimized_intrinsics instead of self.camera_intrinsics
+        if self.last_rgb is None or self.last_depth is None or self.optimized_intrinsics is None:
             return
-
-        # if self.target_brick_idx is None:
-        #     return
 
         if len(msg.detections) == 0:
             return
@@ -287,6 +346,9 @@ class RosGraspNode(Node):
             return
 
         # 3. Get Coords
+        # IMPORTANT: The Yolo Node sends coordinates based on the UNDISTORTED image.
+        # Since we are also undistorting 'self.last_rgb' and 'self.last_depth' here, 
+        # these coordinates match perfectly.
         cx_det = float(target_det.bbox.center.position.x)
         cy_det = float(target_det.bbox.center.position.y)
         w_det = float(target_det.bbox.size_x)
@@ -373,13 +435,16 @@ class RosGraspNode(Node):
             return
 
         # 10. Compute 3D Pose
-        fx, fy = self.camera_intrinsics['fx'], self.camera_intrinsics['fy']
-        cx, cy = self.camera_intrinsics['cx'], self.camera_intrinsics['cy']
-        d_val = d_val # * 1000  # Convert to mm if needed
-        self.get_logger().info(f"Camera Intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}, depth={d_val}")
-        X = (cx_full - cx) * d_val / fx
-        Y = (cy_full - cy) * d_val / fy
-        Z = d_val
+        # USE OPTIMIZED INTRINSICS (Because cx_full/cy_full come from the undistorted image)
+        fx, fy = self.optimized_intrinsics['fx'], self.optimized_intrinsics['fy']
+        cx, cy = self.optimized_intrinsics['cx'], self.optimized_intrinsics['cy']
+        
+        self.get_logger().info(f"Using Optimized Intrinsics: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}, depth={d_val:.3f}")
+        
+        d_fixed = 0.712
+        X = (cx_full - cx) * d_fixed / fx
+        Y = (cy_full - cy) * d_fixed / fy
+        Z = d_fixed
 
         # 11. Publish Custom BrickGrasp Message
         grasp_msg = GraspPoint()
@@ -394,7 +459,19 @@ class RosGraspNode(Node):
         grasp_msg.pose.position.y = float(Y)
         grasp_msg.pose.position.z = float(Z)
         
-        half_theta = best_ang / 2.0
+        # half_theta = -best_ang / 2.0
+
+        # --- FIX: NEGATE ANGLE ---
+        # The visual model sees clockwise as positive (Image Space).
+        # The robot frame sees counter-clockwise as positive (Right-Hand Rule).
+        # We must flip the sign to match them.
+        corrected_angle = best_ang 
+        
+        # OPTIONAL: Handle the +/- 90 degree gripper symmetry wrap-around
+        # This keeps the gripper from spinning 180 unnecessarily
+        # corrected_angle = -best_ang + (math.pi / 2)
+        # Create Quaternion from corrected_angle
+        half_theta = corrected_angle / 2.0
         grasp_msg.pose.orientation.y = 0.0
         grasp_msg.pose.orientation.x = 0.0
         grasp_msg.pose.orientation.z = math.sin(half_theta)
@@ -403,16 +480,16 @@ class RosGraspNode(Node):
         self.pose_pub.publish(grasp_msg)
             
         # 12. Visualize
-        if self.last_rgb_detection is not None:
-            vis_img = self.last_rgb_detection.copy()
+        # Use last_rgb (which is now UNDISTORTED) for visualization to match the calculation
+        if self.last_rgb is not None:
+            vis_img = self.last_rgb.copy()
             corners = grasp_corners(cx_full, cy_full, best_ang, length=50, width=20)
             cv2.polylines(vis_img, [corners], isClosed=True, color=(255, 255, 0), thickness=2)
             cv2.circle(vis_img, (cx_full, cy_full), 4, (0, 0, 255), -1)
 
-
             self.vis_pub.publish(self.bridge.cv2_to_imgmsg(vis_img, "bgr8"))
         
-        self.get_logger().info(f"Published BrickGrasp: ID={self.target_brick_idx}, Q={best_q:.2f} at [{X:.2f}, {Y:.2f}, {Z:.2f}]")
+        self.get_logger().info(f"Published BrickGrasp: ID={self.target_brick_idx}, Q={best_q:.2f} at [{X:.2f}, {Y:.2f}, {Z:.2f}, Orientation z={grasp_msg.pose.orientation.z:.2f}, w={grasp_msg.pose.orientation.w:.2f}, angle={best_ang}]")
 
         return grasp_msg
     
