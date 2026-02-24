@@ -97,8 +97,8 @@ class RosGraspNode(Node):
         self.detections:Detection2DArray = None
 
         # --- Parameters ---
-        self.declare_parameter('ckpt_path', '/home/mohamed/gp_ws/src/detection_grasping/brick_grasping_model/weights/BEST.pth')
-        self.declare_parameter('arch', 'swin_tiny')
+        self.declare_parameter('ckpt_path', '/home/mohamed/gp_ws/src/detection_grasping/brick_grasping_model/weights/resnet_BEST.pth')
+        self.declare_parameter('arch', 'resnet_unet')
         self.declare_parameter('input_size', 160)
         self.declare_parameter('use_depth', True)
         self.declare_parameter('use_rgb', True)
@@ -465,7 +465,13 @@ class RosGraspNode(Node):
         # The visual model sees clockwise as positive (Image Space).
         # The robot frame sees counter-clockwise as positive (Right-Hand Rule).
         # We must flip the sign to match them.
-        corrected_angle = best_ang 
+        if best_ang > 0:
+            corrected_angle = -(best_ang - math.pi)
+        else:
+            corrected_angle = -(best_ang + math.pi)
+        # corrected_angle = best_ang
+        log = corrected_angle*180/3.14
+        self.get_logger().info(f"Best Angle (Degree): {log}")
         
         # OPTIONAL: Handle the +/- 90 degree gripper symmetry wrap-around
         # This keeps the gripper from spinning 180 unnecessarily

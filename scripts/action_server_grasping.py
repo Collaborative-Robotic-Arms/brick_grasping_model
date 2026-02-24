@@ -73,8 +73,8 @@ class GraspRelay(Node):
             # )
             # -0.0546 0.769" rpy="3.14 1.57 0.0" />
             transformed_pose.pose.position.z = 0.26 
-            transformed_pose.pose.position.x = source_pose.pose.position.y + 0.678
-            transformed_pose.pose.position.y = source_pose.pose.position.x - 0.0546
+            transformed_pose.pose.position.x = source_pose.pose.position.y + 0.674
+            transformed_pose.pose.position.y = source_pose.pose.position.x + 0.033
             # Maintain specific orientation components from the original logic
             transformed_pose.pose.orientation.z = msg.pose.orientation.z
             transformed_pose.pose.orientation.w = msg.pose.orientation.w
@@ -104,8 +104,8 @@ class GraspRelay(Node):
         QZ = target_pose.orientation.z
         
         goal_msg.target_pose = target_pose
-        goal_msg.target_pose.orientation.x = -QZ
-        goal_msg.target_pose.orientation.y = -QW
+        goal_msg.target_pose.orientation.x = QW
+        goal_msg.target_pose.orientation.y = QZ
         goal_msg.target_pose.orientation.z = 0.0
         goal_msg.target_pose.orientation.w = 0.0
         goal_msg.target_pose.position.z = 0.21
