@@ -97,7 +97,12 @@ class RosGraspNode(Node):
         self.detections:Detection2DArray = None
 
         # --- Parameters ---
-        self.declare_parameter('ckpt_path', '/home/mohamed/gp_ws/src/detection_grasping/brick_grasping_model/weights/resnet_BEST.pth')
+        default_ckpt_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'weights',
+            'resnet_BEST.pth'
+        )
+        self.declare_parameter('ckpt_path', default_ckpt_path)
         self.declare_parameter('arch', 'resnet_unet')
         self.declare_parameter('input_size', 160)
         self.declare_parameter('use_depth', True)
