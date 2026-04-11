@@ -91,7 +91,7 @@ class RosGraspNode(Node):
             depth=1
         )
 
-        self.declare_parameter('use_sim', True)
+        self.declare_parameter('use_sim', False)
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.latest_grasp = None
         self.latest_grasp_lock = threading.Lock()
@@ -150,44 +150,44 @@ class RosGraspNode(Node):
         # =========================================================================
         # --- CALIBRATION DATA ---
         # =========================================================================
-        if not self.use_sim:
-            # Camera Matrix (K)
-            self.k_matrix = np.array([
-                [607.6493463464219, 0.0, 330.2045740645484],
-                [0.0, 605.19606629627, 246.36866587909964],
-                [0.0, 0.0, 1.0]
-            ], dtype=np.float64)
+        # if not self.use_sim:
+        #     # Camera Matrix (K)
+        #     self.k_matrix = np.array([
+        #         [607.6493463464219, 0.0, 330.2045740645484],
+        #         [0.0, 605.19606629627, 246.36866587909964],
+        #         [0.0, 0.0, 1.0]
+        #     ], dtype=np.float64)
 
-            # Distortion Coefficients (D)
-            self.dist_coeffs = np.array([
-                0.030701467019085278, 0.6603616986413218, 
-                -0.0030859808687108714, -0.005391372766986892, 
-                -2.547370818352119
-            ], dtype=np.float64)
+        #     # Distortion Coefficients (D)
+        #     self.dist_coeffs = np.array([
+        #         0.030701467019085278, 0.6603616986413218, 
+        #         -0.0030859808687108714, -0.005391372766986892, 
+        #         -2.547370818352119
+        #     ], dtype=np.float64)
 
-            # Optimization: Pre-compute the Map
-            self.img_w, self.img_h = 640, 480 
+        #     # Optimization: Pre-compute the Map
+        #     self.img_w, self.img_h = 640, 480 
             
-            # Alpha=0 crops the image to remove black edges created by undistortion
-            self.new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(
-                self.k_matrix, self.dist_coeffs, (self.img_w, self.img_h), 0, (self.img_w, self.img_h)
-            )
+        #     # Alpha=0 crops the image to remove black edges created by undistortion
+        #     self.new_camera_mtx, roi = cv2.getOptimalNewCameraMatrix(
+        #         self.k_matrix, self.dist_coeffs, (self.img_w, self.img_h), 0, (self.img_w, self.img_h)
+        #     )
             
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.k_matrix, self.dist_coeffs, None, self.new_camera_mtx, 
-                (self.img_w, self.img_h), cv2.CV_32FC1
-            )
+        #     self.map1, self.map2 = cv2.initUndistortRectifyMap(
+        #         self.k_matrix, self.dist_coeffs, None, self.new_camera_mtx, 
+        #         (self.img_w, self.img_h), cv2.CV_32FC1
+        #     )
             
-            # This will be used for 3D reconstruction instead of the raw K matrix
-            self.optimized_intrinsics = {
-                'fx': self.new_camera_mtx[0, 0], 'fy': self.new_camera_mtx[1, 1],
-                'cx': self.new_camera_mtx[0, 2], 'cy': self.new_camera_mtx[1, 2]
-            }
+        #     # This will be used for 3D reconstruction instead of the raw K matrix
+        #     self.optimized_intrinsics = {
+        #         'fx': self.new_camera_mtx[0, 0], 'fy': self.new_camera_mtx[1, 1],
+        #         'cx': self.new_camera_mtx[0, 2], 'cy': self.new_camera_mtx[1, 2]
+        #     }
             
-            self.camera_info_received = True 
-            self.get_logger().info("HARDWARE Calibration Loaded & Undistort Maps Computed.")
-        else:
-            self.get_logger().info("SIMULATION MODE Active: Waiting for /camera_info...")
+        #     self.camera_info_received = True 
+        #     self.get_logger().info("HARDWARE Calibration Loaded & Undistort Maps Computed.")
+        # else:
+        #     self.get_logger().info("SIMULATION MODE Active: Waiting for /camera_info...")
         # =========================================================================
 
         # --- Load Model ---
@@ -215,8 +215,7 @@ class RosGraspNode(Node):
         self.detection_sub = self.create_subscription(Image, detection_debug, self.detection_callback, qos)
         self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_callback, qos)
         self.dets_sub = self.create_subscription(Detection2DArray, dets_topic, self.dets_callback, 10)
-        if self.use_sim:
-            self.cam_info_sub = self.create_subscription(CameraInfo, camera_info_topic, self.cam_info_callback, 10)
+        self.cam_info_sub = self.create_subscription(CameraInfo, camera_info_topic, self.cam_info_callback, 10)
         
         # We NO LONGER need camera_info subscription because we hardcoded it
         # self.cam_info_sub = self.create_subscription(CameraInfo, cam_info_topic, self.cam_info_callback, 10)
@@ -283,22 +282,13 @@ class RosGraspNode(Node):
         if self.camera_info_received:
             return
 
-        self.k_matrix = np.array(msg.k).reshape((3, 3))
-        self.dist_coeffs = np.array(msg.d) if len(msg.d) > 0 else np.zeros(5)
         self.img_w = msg.width
         self.img_h = msg.height
+        self.k_matrix = np.array(msg.k).reshape((3, 3))
+        self.dist_coeffs = np.array(msg.d) if len(msg.d) > 0 else np.zeros(5)
 
-        if self.use_sim:
-            self.optimized_intrinsics = {
-                'fx': self.k_matrix[0, 0], 'fy': self.k_matrix[1, 1],
-                'cx': self.k_matrix[0, 2], 'cy': self.k_matrix[1, 2]
-            }
-            self.map1 = None
-            self.map2 = None
-            self.camera_info_received = True
-            self.get_logger().info("SIMULATION: Using perfect raw intrinsics. Undistortion disabled.")
-        else:
-            self.dist_coeffs = np.array(msg.d) if len(msg.d) > 0 else np.zeros(5)
+        # If distortion coefficients exist (Hardware)
+        if np.any(self.dist_coeffs):
             self.new_camera_mtx, _ = cv2.getOptimalNewCameraMatrix(
                 self.k_matrix, self.dist_coeffs, (self.img_w, self.img_h), 0, (self.img_w, self.img_h)
             )
@@ -310,8 +300,20 @@ class RosGraspNode(Node):
                 'fx': self.new_camera_mtx[0, 0], 'fy': self.new_camera_mtx[1, 1],
                 'cx': self.new_camera_mtx[0, 2], 'cy': self.new_camera_mtx[1, 2]
             }
-            self.camera_info_received = True
-        self.get_logger().info("SIMULATION Intrinsics dynamically loaded.")
+            self.get_logger().info("Hardware calibration loaded & Undistort maps computed.")
+        
+        # No distortion (Simulation / pre-rectified)
+        else:
+            self.optimized_intrinsics = {
+                'fx': self.k_matrix[0, 0], 'fy': self.k_matrix[1, 1],
+                'cx': self.k_matrix[0, 2], 'cy': self.k_matrix[1, 2]
+            }
+            self.map1 = None
+            self.map2 = None
+            self.new_camera_mtx = self.k_matrix
+            self.get_logger().info("Simulation/Perfect intrinsics loaded. Undistortion bypassed.")
+
+        self.camera_info_received = True
 
 
     def rgb_callback(self, msg):
