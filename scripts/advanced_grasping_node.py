@@ -92,6 +92,7 @@ class RosGraspNode(Node):
         )
 
         self.declare_parameter('use_sim', False)
+        self.declare_parameter('static_z_height', 0.712) 
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.latest_grasp = None
         self.latest_grasp_lock = threading.Lock()
@@ -111,6 +112,7 @@ class RosGraspNode(Node):
         self.declare_parameter('use_rgb', True)
         self.use_sim = self.get_parameter('use_sim').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
+        self.static_z = self.get_parameter('static_z_height').value
 
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
@@ -521,19 +523,14 @@ class RosGraspNode(Node):
         fx, fy = self.optimized_intrinsics['fx'], self.optimized_intrinsics['fy']
         cx, cy = self.optimized_intrinsics['cx'], self.optimized_intrinsics['cy']
         
-        self.get_logger().info(f"Using Optimized Intrinsics: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}, depth={d_val:.3f}")
+        self.get_logger().info(f"Using Optimized Intrinsics: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}, depth map={d_val:.3f}")
         
-        if self.use_sim:
-            # SIMULATION: Use the true depth map value to prevent Parallax Error
-            X = (cx_full - cx) * float(d_val) / fx
-            Y = (cy_full - cy) * float(d_val) / fy
-            Z = float(d_val)
-        else:
-            # HARDWARE: Use the trusted, hardcoded table distance
-            d_fixed = 0.712
-            X = (cx_full - cx) * d_fixed / fx
-            Y = (cy_full - cy) * d_fixed / fy
-            Z = d_fixed
+        # UNIFIED LOGIC: Both Sim and Hardware use the static parameter
+        fixed_z = float(self.static_z)
+        
+        X = (cx_full - cx) * fixed_z / fx
+        Y = (cy_full - cy) * fixed_z / fy
+        Z = fixed_z
 
         # 11. Publish Custom BrickGrasp Message
         grasp_msg = GraspPoint()
