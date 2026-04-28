@@ -103,7 +103,7 @@ class RosGraspNode(Node):
         default_ckpt_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             'weights',
-            'resnet_BEST.pth'
+            'resnet_gp2_3_BEST.pth'
         )
         self.declare_parameter('ckpt_path', default_ckpt_path)
         self.declare_parameter('arch', 'resnet_unet')
